@@ -4,6 +4,7 @@ import { useState, useEffect } from "react";
 const CLIENT_ID = "463460576555-afb2ktqtenvvttv9q6q8sf9p2mlbh1lp.apps.googleusercontent.com";
 const SCOPES = "https://www.googleapis.com/auth/gmail.send";
 const STORAGE_KEY = "vendor_crm_contacts";
+const ARCHIVE_KEY = "vendor_crm_archived";
 
 const STATUS_META = {
   new:        { label: "New",           color: "#888780", bg: "#F1EFE8", text: "#444441" },
@@ -45,17 +46,18 @@ async function sendGmailEmail(accessToken, to, subject, body) {
   return true;
 }
 
-function loadContacts() {
-  try { const raw = localStorage.getItem(STORAGE_KEY); return raw ? JSON.parse(raw) : []; }
+function load(key) {
+  try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : []; }
   catch { return []; }
 }
-
-function saveContacts(contacts) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(contacts)); } catch {}
+function save(key, data) {
+  try { localStorage.setItem(key, JSON.stringify(data)); } catch {}
 }
 
 export default function VendorCRM() {
-  const [contacts, setContactsRaw] = useState(() => loadContacts());
+  const [contacts, setContactsRaw] = useState(() => load(STORAGE_KEY));
+  const [archived, setArchivedRaw] = useState(() => load(ARCHIVE_KEY));
+  const [view, setView] = useState("pipeline"); // "pipeline" | "archive"
   const [filter, setFilter] = useState("all");
   const [modal, setModal] = useState(null);
   const [toast, setToast] = useState(null);
@@ -71,7 +73,15 @@ export default function VendorCRM() {
   function setContacts(fn) {
     setContactsRaw(prev => {
       const next = typeof fn === "function" ? fn(prev) : fn;
-      saveContacts(next);
+      save(STORAGE_KEY, next);
+      return next;
+    });
+  }
+
+  function setArchived(fn) {
+    setArchivedRaw(prev => {
+      const next = typeof fn === "function" ? fn(prev) : fn;
+      save(ARCHIVE_KEY, next);
       return next;
     });
   }
@@ -81,21 +91,39 @@ export default function VendorCRM() {
     setTimeout(() => setToast(null), 3000);
   }
 
+  function archiveContact(id) {
+    const c = contacts.find(x => x.id === id);
+    if (!c) return;
+    setContacts(prev => prev.filter(x => x.id !== id));
+    setArchived(prev => [{ ...c, archivedAt: new Date().toISOString().slice(0,10) }, ...prev]);
+    showToast(c.company + " archived");
+  }
+
+  function restoreContact(id) {
+    const c = archived.find(x => x.id === id);
+    if (!c) return;
+    setArchived(prev => prev.filter(x => x.id !== id));
+    const { archivedAt, ...rest } = c;
+    setContacts(prev => [{ ...rest, lastAction: "Restored from archive" }, ...prev]);
+    showToast(c.company + " restored");
+  }
+
+  function deleteArchived(id) {
+    const c = archived.find(x => x.id === id);
+    setArchived(prev => prev.filter(x => x.id !== id));
+    showToast((c?.company || "Contact") + " deleted");
+  }
+
   function silentLogin(hint) {
     if (!window.google) return;
     const client = window.google.accounts.oauth2.initTokenClient({
-      client_id: CLIENT_ID,
-      scope: SCOPES,
-      prompt: "",
-      hint: hint || undefined,
+      client_id: CLIENT_ID, scope: SCOPES, prompt: "", hint: hint || undefined,
       callback: async (resp) => {
         if (resp.error) return;
         setAccessToken(resp.access_token);
         setTokenExpiry(Date.now() + (resp.expires_in || 3600) * 1000);
         if (!userEmail) {
-          const info = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-            headers: { Authorization: `Bearer ${resp.access_token}` }
-          }).then(r => r.json());
+          const info = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", { headers: { Authorization: `Bearer ${resp.access_token}` } }).then(r => r.json());
           setUserEmail(info.email);
           localStorage.setItem("crm_user_email", info.email);
         }
@@ -108,10 +136,7 @@ export default function VendorCRM() {
     const script = document.createElement("script");
     script.src = "https://accounts.google.com/gsi/client";
     script.async = true;
-    script.onload = () => {
-      const saved = localStorage.getItem("crm_user_email");
-      if (saved) silentLogin(saved);
-    };
+    script.onload = () => { const saved = localStorage.getItem("crm_user_email"); if (saved) silentLogin(saved); };
     document.body.appendChild(script);
     return () => document.body.removeChild(script);
   }, []);
@@ -120,38 +145,27 @@ export default function VendorCRM() {
     if (!tokenExpiry) return;
     const msLeft = tokenExpiry - Date.now() - 60000;
     if (msLeft <= 0) return;
-    const timer = setTimeout(() => {
-      const saved = localStorage.getItem("crm_user_email");
-      silentLogin(saved);
-    }, msLeft);
+    const timer = setTimeout(() => { const saved = localStorage.getItem("crm_user_email"); silentLogin(saved); }, msLeft);
     return () => clearTimeout(timer);
   }, [tokenExpiry]);
 
   function loginWithGoogle() {
     if (!window.google) { showToast("Google not loaded — wait 2s and retry", true); return; }
     const client = window.google.accounts.oauth2.initTokenClient({
-      client_id: CLIENT_ID,
-      scope: SCOPES,
+      client_id: CLIENT_ID, scope: SCOPES,
       callback: async (resp) => {
         if (resp.error) { showToast("Login failed: " + resp.error, true); return; }
         setAccessToken(resp.access_token);
         setTokenExpiry(Date.now() + (resp.expires_in || 3600) * 1000);
-        const info = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", {
-          headers: { Authorization: `Bearer ${resp.access_token}` }
-        }).then(r => r.json());
-        setUserEmail(info.email);
-        localStorage.setItem("crm_user_email", info.email);
+        const info = await fetch("https://www.googleapis.com/oauth2/v3/userinfo", { headers: { Authorization: `Bearer ${resp.access_token}` } }).then(r => r.json());
+        setUserEmail(info.email); localStorage.setItem("crm_user_email", info.email);
         showToast("Connected — " + info.email);
       },
     });
     client.requestAccessToken();
   }
 
-  function logout() {
-    setAccessToken(null); setUserEmail(null); setTokenExpiry(null);
-    localStorage.removeItem("crm_user_email");
-    showToast("Disconnected");
-  }
+  function logout() { setAccessToken(null); setUserEmail(null); setTokenExpiry(null); localStorage.removeItem("crm_user_email"); showToast("Disconnected"); }
 
   const filtered = filter === "all" ? contacts : contacts.filter(c => c.status === filter);
   const counts = Object.fromEntries(Object.keys(STATUS_META).map(k => [k, contacts.filter(c => c.status === k).length]));
@@ -167,8 +181,7 @@ export default function VendorCRM() {
       await sendGmailEmail(accessToken, c.email, subject, body);
       if (type === "outreach") updateContact(id, { status:"sent", lastAction:"Initial outreach sent", date:new Date().toISOString().slice(0,10) });
       else updateContact(id, { status:"scheduled", lastAction: callDate ? "Call confirmed — " + callDate : "Confirmation sent" });
-      setModal(null);
-      showToast("Email sent to " + c.company);
+      setModal(null); showToast("Email sent to " + c.company);
     } catch(e) { showToast(e.message, true); }
     setSending(false);
   }
@@ -180,8 +193,7 @@ export default function VendorCRM() {
 
   function addContact() {
     if (!addForm.company || !addForm.contact) { showToast("Company and contact required", true); return; }
-    const id = Date.now();
-    setContacts(prev => [{ id, ...addForm, status:"new", lastAction:"Added to pipeline", date:new Date().toISOString().slice(0,10) }, ...prev]);
+    setContacts(prev => [{ id:Date.now(), ...addForm, status:"new", lastAction:"Added to pipeline", date:new Date().toISOString().slice(0,10) }, ...prev]);
     setModal(null); setAddForm({ company:"", contact:"", email:"", category:"Data provider" });
     showToast(addForm.company + " added");
   }
@@ -195,6 +207,8 @@ export default function VendorCRM() {
     gmailOn: { padding:"7px 14px", fontSize:12, borderRadius:8, border:"0.5px solid #4caf50", background:"#f0faf0", color:"#27500A", cursor:"pointer" },
     gmailReconnect: { padding:"7px 14px", fontSize:12, borderRadius:8, border:"0.5px solid #BA7517", background:"#FAEEDA", color:"#633806", cursor:"pointer" },
     addBtn: { background:"#0C1A2E", color:"#fff", border:"none", borderRadius:8, padding:"7px 16px", fontSize:13, fontWeight:500, cursor:"pointer" },
+    viewToggle: { display:"flex", gap:0, borderRadius:8, overflow:"hidden", border:"0.5px solid #ddd" },
+    viewBtn: (a) => ({ padding:"7px 16px", fontSize:12, border:"none", background:a?"#0C1A2E":"#f5f5f3", color:a?"#fff":"#555", cursor:"pointer", fontWeight: a?500:400 }),
     statsGrid: { display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:8, marginBottom:"1.25rem" },
     statCard: { background:"#f5f5f3", borderRadius:8, padding:"10px 12px", textAlign:"center" },
     statNum: { fontSize:20, fontWeight:500 },
@@ -204,11 +218,14 @@ export default function VendorCRM() {
     table: { width:"100%", borderCollapse:"collapse", fontSize:13 },
     th: { textAlign:"left", padding:"8px 10px", color:"#777", fontWeight:400, fontSize:12, borderBottom:"0.5px solid #e5e5e5" },
     td: { padding:"9px 10px", borderBottom:"0.5px solid #e8e8e8", verticalAlign:"middle" },
-    badge: (st) => ({ display:"inline-flex", alignItems:"center", gap:5, padding:"2px 9px", borderRadius:99, fontSize:11, fontWeight:500, background:STATUS_META[st].bg, color:STATUS_META[st].text }),
-    dot: (st) => ({ width:6, height:6, borderRadius:"50%", background:STATUS_META[st].color, flexShrink:0 }),
+    badge: (st) => ({ display:"inline-flex", alignItems:"center", gap:5, padding:"2px 9px", borderRadius:99, fontSize:11, fontWeight:500, background:STATUS_META[st]?.bg||"#eee", color:STATUS_META[st]?.text||"#555" }),
+    dot: (st) => ({ width:6, height:6, borderRadius:"50%", background:STATUS_META[st]?.color||"#aaa", flexShrink:0 }),
     btn: { padding:"4px 10px", fontSize:11, borderRadius:7, border:"0.5px solid #ccc", background:"transparent", cursor:"pointer" },
     btnP: { padding:"4px 10px", fontSize:11, borderRadius:7, border:"none", background:"#0C1A2E", color:"#fff", cursor:"pointer" },
     btnD: { padding:"4px 10px", fontSize:11, borderRadius:7, border:"none", background:"#ccc", color:"#fff", cursor:"not-allowed" },
+    btnArchive: { padding:"4px 10px", fontSize:11, borderRadius:7, border:"0.5px solid #ddd", background:"#f5f5f3", color:"#666", cursor:"pointer" },
+    btnRestore: { padding:"4px 10px", fontSize:11, borderRadius:7, border:"0.5px solid #4caf50", background:"#f0faf0", color:"#27500A", cursor:"pointer" },
+    btnDelete: { padding:"4px 10px", fontSize:11, borderRadius:7, border:"0.5px solid #E24B4A", background:"#fff0f0", color:"#791F1F", cursor:"pointer" },
     overlay: { position:"absolute", inset:0, background:"rgba(0,0,0,0.35)", display:"flex", alignItems:"flex-start", justifyContent:"center", paddingTop:40, zIndex:100 },
     modal: { background:"#fff", borderRadius:12, border:"0.5px solid #ddd", width:500, maxWidth:"95%", padding:"1.5rem" },
     mH: { display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"1.25rem" },
@@ -223,15 +240,20 @@ export default function VendorCRM() {
     fAct: { display:"flex", gap:8, justifyContent:"flex-end", marginTop:"1.25rem" },
     warn: { background:"#FAEEDA", border:"0.5px solid #BA7517", borderRadius:7, padding:"8px 12px", fontSize:12, color:"#633806", marginBottom:12 },
     emptyState: { textAlign:"center", padding:"3rem 0", color:"#999", fontSize:13 },
+    archiveBanner: { background:"#f5f5f3", borderRadius:8, padding:"10px 14px", fontSize:12, color:"#666", marginBottom:"1.25rem", display:"flex", alignItems:"center", justifyContent:"space-between" },
     toast: (err) => ({ position:"absolute", bottom:16, right:0, background:err?"#c0392b":"#0C1A2E", color:"#fff", padding:"8px 16px", borderRadius:8, fontSize:13, zIndex:200 }),
   };
 
   function actionsFor(c) {
-    if (c.status === "new") return <button style={s.btnP} onClick={() => setModal({ type:"outreach", id:c.id })}>Send outreach</button>;
-    if (c.status === "sent") return <button style={s.btn} onClick={() => { setReplyForm({ status:"interested", notes:"" }); setModal({ type:"reply", id:c.id }); }}>Log reply</button>;
-    if (c.status === "interested") return <button style={s.btnP} onClick={() => { setCallDate(""); setModal({ type:"schedule", id:c.id }); }}>Send confirmation</button>;
-    if (c.status === "scheduled") return <button style={s.btn} onClick={() => setModal({ type:"view", id:c.id, body:emailConfirmation(c,"").body })}>View email</button>;
-    return <button style={s.btn} onClick={() => { setContacts(prev => prev.filter(x => x.id !== c.id)); showToast("Archived"); }}>Archive</button>;
+    return (
+      <div style={{ display:"flex", gap:6, justifyContent:"flex-end" }}>
+        {c.status === "new" && <button style={s.btnP} onClick={() => setModal({ type:"outreach", id:c.id })}>Send outreach</button>}
+        {c.status === "sent" && <button style={s.btn} onClick={() => { setReplyForm({ status:"interested", notes:"" }); setModal({ type:"reply", id:c.id }); }}>Log reply</button>}
+        {c.status === "interested" && <button style={s.btnP} onClick={() => { setCallDate(""); setModal({ type:"schedule", id:c.id }); }}>Send confirmation</button>}
+        {c.status === "scheduled" && <button style={s.btn} onClick={() => setModal({ type:"view", id:c.id, body:emailConfirmation(c,"").body })}>View email</button>}
+        <button style={s.btnArchive} onClick={() => archiveContact(c.id)}>Archive</button>
+      </div>
+    );
   }
 
   const getModal = () => {
@@ -299,7 +321,7 @@ export default function VendorCRM() {
     if (type === "view") return (
       <div style={s.overlay} onClick={e => e.target===e.currentTarget && setModal(null)}>
         <div style={s.modal}>
-          <div style={s.mH}><h2 style={s.mT}>Email — {c.company}</h2><button style={s.xBtn} onClick={() => setModal(null)}>×</button></div>
+          <div style={s.mH}><h2 style={s.mT}>Email — {c?.company}</h2><button style={s.xBtn} onClick={() => setModal(null)}>×</button></div>
           <div style={s.ebox}>{modal.body}</div>
           <div style={s.fAct}><button style={s.btnP} onClick={() => setModal(null)}>Close</button></div>
         </div>
@@ -341,54 +363,102 @@ export default function VendorCRM() {
   return (
     <div style={s.shell}>
       <div style={s.topBar}>
-        <h1 style={s.h1}>Vendor & Service Provider Pipeline</h1>
+        <div style={s.row}>
+          <div style={s.viewToggle}>
+            <button style={s.viewBtn(view==="pipeline")} onClick={() => setView("pipeline")}>Pipeline</button>
+            <button style={s.viewBtn(view==="archive")} onClick={() => setView("archive")}>
+              Archive {archived.length > 0 && `(${archived.length})`}
+            </button>
+          </div>
+        </div>
         <div style={s.row}>
           {gmailButton()}
-          <button style={s.addBtn} onClick={() => setModal({ type:"add" })}>+ Add contact</button>
+          {view === "pipeline" && <button style={s.addBtn} onClick={() => setModal({ type:"add" })}>+ Add contact</button>}
         </div>
       </div>
 
-      <div style={s.statsGrid}>
-        <div style={s.statCard}><div style={s.statNum}>{contacts.length}</div><div style={s.statLbl}>Total</div></div>
-        <div style={s.statCard}><div style={{...s.statNum, color:STATUS_META.sent.color}}>{counts.sent}</div><div style={s.statLbl}>Sent</div></div>
-        <div style={s.statCard}><div style={{...s.statNum, color:STATUS_META.interested.color}}>{counts.interested}</div><div style={s.statLbl}>Interested</div></div>
-        <div style={s.statCard}><div style={{...s.statNum, color:STATUS_META.scheduled.color}}>{counts.scheduled}</div><div style={s.statLbl}>Scheduled</div></div>
-        <div style={s.statCard}><div style={{...s.statNum, color:STATUS_META.declined.color}}>{counts.declined}</div><div style={s.statLbl}>Declined</div></div>
-      </div>
+      {view === "pipeline" && <>
+        <div style={s.statsGrid}>
+          <div style={s.statCard}><div style={s.statNum}>{contacts.length}</div><div style={s.statLbl}>Total</div></div>
+          <div style={s.statCard}><div style={{...s.statNum, color:STATUS_META.sent.color}}>{counts.sent}</div><div style={s.statLbl}>Sent</div></div>
+          <div style={s.statCard}><div style={{...s.statNum, color:STATUS_META.interested.color}}>{counts.interested}</div><div style={s.statLbl}>Interested</div></div>
+          <div style={s.statCard}><div style={{...s.statNum, color:STATUS_META.scheduled.color}}>{counts.scheduled}</div><div style={s.statLbl}>Scheduled</div></div>
+          <div style={s.statCard}><div style={{...s.statNum, color:STATUS_META.declined.color}}>{counts.declined}</div><div style={s.statLbl}>Declined</div></div>
+        </div>
 
-      <div style={s.tabs}>
-        {[["all","All"], ...Object.entries(STATUS_META).map(([k,v]) => [k,v.label])].map(([k,lbl]) => (
-          <button key={k} style={s.tab(filter===k)} onClick={() => setFilter(k)}>{lbl}</button>
-        ))}
-      </div>
+        <div style={s.tabs}>
+          {[["all","All"], ...Object.entries(STATUS_META).map(([k,v]) => [k,v.label])].map(([k,lbl]) => (
+            <button key={k} style={s.tab(filter===k)} onClick={() => setFilter(k)}>{lbl}</button>
+          ))}
+        </div>
 
-      <table style={s.table}>
-        <thead>
-          <tr>
-            <th style={s.th}>Company</th>
-            <th style={s.th}>Contact</th>
-            <th style={s.th}>Category</th>
-            <th style={s.th}>Status</th>
-            <th style={s.th}>Last action</th>
-            <th style={s.th}></th>
-          </tr>
-        </thead>
-        <tbody>
-          {filtered.length === 0
-            ? <tr><td colSpan={6} style={s.emptyState}>No contacts yet — click + Add contact to start</td></tr>
-            : filtered.map(c => (
-              <tr key={c.id}>
-                <td style={{...s.td, fontWeight:500}}>{c.company}</td>
-                <td style={{...s.td, color:"#666"}}>{c.contact}</td>
-                <td style={{...s.td, color:"#666"}}>{c.category}</td>
-                <td style={s.td}><span style={s.badge(c.status)}><span style={s.dot(c.status)}></span>{STATUS_META[c.status].label}</span></td>
-                <td style={{...s.td, color:"#888", fontSize:12}}>{c.lastAction}</td>
-                <td style={{...s.td, textAlign:"right"}}>{actionsFor(c)}</td>
-              </tr>
-            ))
-          }
-        </tbody>
-      </table>
+        <table style={s.table}>
+          <thead>
+            <tr>
+              <th style={s.th}>Company</th>
+              <th style={s.th}>Contact</th>
+              <th style={s.th}>Category</th>
+              <th style={s.th}>Status</th>
+              <th style={s.th}>Last action</th>
+              <th style={s.th}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0
+              ? <tr><td colSpan={6} style={s.emptyState}>No contacts yet — click + Add contact to start</td></tr>
+              : filtered.map(c => (
+                <tr key={c.id}>
+                  <td style={{...s.td, fontWeight:500}}>{c.company}</td>
+                  <td style={{...s.td, color:"#666"}}>{c.contact}</td>
+                  <td style={{...s.td, color:"#666"}}>{c.category}</td>
+                  <td style={s.td}><span style={s.badge(c.status)}><span style={s.dot(c.status)}></span>{STATUS_META[c.status].label}</span></td>
+                  <td style={{...s.td, color:"#888", fontSize:12}}>{c.lastAction}</td>
+                  <td style={{...s.td}}>{actionsFor(c)}</td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </>}
+
+      {view === "archive" && <>
+        <div style={s.archiveBanner}>
+          <span>{archived.length} archived contact{archived.length !== 1 ? "s" : ""}</span>
+          <span style={{fontSize:11, color:"#aaa"}}>Restore to move back to pipeline — Delete to remove permanently</span>
+        </div>
+        <table style={s.table}>
+          <thead>
+            <tr>
+              <th style={s.th}>Company</th>
+              <th style={s.th}>Contact</th>
+              <th style={s.th}>Category</th>
+              <th style={s.th}>Last status</th>
+              <th style={s.th}>Archived on</th>
+              <th style={s.th}></th>
+            </tr>
+          </thead>
+          <tbody>
+            {archived.length === 0
+              ? <tr><td colSpan={6} style={s.emptyState}>No archived contacts</td></tr>
+              : archived.map(c => (
+                <tr key={c.id}>
+                  <td style={{...s.td, fontWeight:500, color:"#888"}}>{c.company}</td>
+                  <td style={{...s.td, color:"#aaa"}}>{c.contact}</td>
+                  <td style={{...s.td, color:"#aaa"}}>{c.category}</td>
+                  <td style={s.td}><span style={s.badge(c.status)}><span style={s.dot(c.status)}></span>{STATUS_META[c.status]?.label || c.status}</span></td>
+                  <td style={{...s.td, color:"#aaa", fontSize:12}}>{c.archivedAt}</td>
+                  <td style={s.td}>
+                    <div style={{ display:"flex", gap:6, justifyContent:"flex-end" }}>
+                      <button style={s.btnRestore} onClick={() => restoreContact(c.id)}>Restore</button>
+                      <button style={s.btnDelete} onClick={() => deleteArchived(c.id)}>Delete</button>
+                    </div>
+                  </td>
+                </tr>
+              ))
+            }
+          </tbody>
+        </table>
+      </>}
 
       {getModal()}
       {toast && <div style={s.toast(toastErr)}>{toast}</div>}
